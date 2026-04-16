@@ -47,9 +47,9 @@ const { values: args } = parseArgs({
 });
 
 if (args.help) {
-  console.log(`StreamFlix CLI
+  console.log(`AlexTV CLI
 
-Usage: node streamflix-cli.mjs [options]
+Usage: node alextv-cli.mjs [options]
 
 Options:
   -t, --type <movie|series>  Content type (default: interactive)
@@ -62,9 +62,9 @@ Options:
   -h, --help                 Show this help message
 
 Examples:
-  node streamflix-cli.mjs --type movie --title "Inception" --pick 1 --quality 1
-  node streamflix-cli.mjs -t series -q "Breaking Bad" -p 1 -s 1 -e 3 -k 1 --json
-  node streamflix-cli.mjs  (interactive mode)`);
+  node alextv-cli.mjs --type movie --title "Inception" --pick 1 --quality 1
+  node alextv-cli.mjs -t series -q "Breaking Bad" -p 1 -s 1 -e 3 -k 1 --json
+  node alextv-cli.mjs  (interactive mode)`);
   process.exit(0);
 }
 
@@ -184,7 +184,7 @@ function pickFile(files) {
 }
 
 async function main() {
-  console.log('StreamFlix CLI');
+  console.log('AlexTV CLI');
 
   const typeMap = { movie: '1', series: '2', tv: '2' };
   const modeArg = args.type ? (typeMap[args.type.toLowerCase()] || args.type) : undefined;

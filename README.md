@@ -1,4 +1,4 @@
-# StreamFlix CLI
+# AlexTV CLI
 
 A single-file Node.js CLI tool to search and stream movies & TV series from ShowBox/FebBox.
 
@@ -18,15 +18,15 @@ npm install
 ### Interactive mode
 
 ```bash
-node streamflix-cli.mjs
+node alextv-cli.mjs
 ```
 
 ### Non-interactive mode (CLI flags)
 
 ```bash
-node streamflix-cli.mjs --type movie --title "Inception" --pick 1 --quality 1
-node streamflix-cli.mjs -t series -q "Breaking Bad" -p 1 -s 1 -e 3 -k 1
-node streamflix-cli.mjs -t movie -q "Interstellar" --json   # JSON output for scripts/agents
+node alextv-cli.mjs --type movie --title "Inception" --pick 1 --quality 1
+node alextv-cli.mjs -t series -q "Breaking Bad" -p 1 -s 1 -e 3 -k 1
+node alextv-cli.mjs -t movie -q "Interstellar" --json   # JSON output for scripts/agents
 ```
 
 | Flag | Short | Description |
@@ -92,6 +92,6 @@ https://proxy.example.com/...
 
 ## Notes
 
-- ShowBox API keys and FebBox cookie are hardcoded in `streamflix-cli.mjs`.
+- ShowBox API keys and FebBox cookie are hardcoded in `alextv-cli.mjs`.
 - The proxy base points to a Cloudflare Worker URL (also hardcoded).
 - Supported video formats: `.mp4`, `.mkv`, `.avi`, `.m3u8`.
