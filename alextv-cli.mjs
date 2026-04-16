@@ -54,10 +54,10 @@ Usage: node alextv-cli.mjs [options]
 Options:
   -t, --type <movie|series>  Content type (default: interactive)
   -q, --title <string>       Search title
-  -p, --pick <number>        Result number to pick (default: 1)
-  -s, --season <number>      Season number (series only, default: 1)
-  -e, --episode <number>     Episode number (series only, default: 1)
-  -k, --quality <number>     Quality option number (default: 1)
+  -p, --pick <number>        Result number to pick
+  -s, --season <number>      Season number (series only)
+  -e, --episode <number>     Episode number (series only)
+  -k, --quality <number>     Quality option number
   -j, --json                 Output result as JSON (for programmatic use)
   -h, --help                 Show this help message
 
@@ -73,7 +73,16 @@ const rl = interactive ? readline.createInterface({ input, output }) : null;
 
 async function ask(prompt, argValue) {
   if (argValue !== undefined) return argValue;
+  if (!rl) throw new Error(`Missing required argument for non-interactive mode: ${prompt.trim()}`);
   return rl.question(prompt);
+}
+
+function parseChoice(raw, max, label) {
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1 || n > max) {
+    throw new Error(`Invalid ${label} choice: "${raw}". Enter a number between 1 and ${max}.`);
+  }
+  return n - 1;
 }
 
 function encrypt(data) {
@@ -188,8 +197,11 @@ async function main() {
 
   const typeMap = { movie: '1', series: '2', tv: '2' };
   const modeArg = args.type ? (typeMap[args.type.toLowerCase()] || args.type) : undefined;
-  const modeInput = await ask('Search for (1) Movie or (2) Series? [1/2]: ', modeArg);
-  const isSeries = modeInput.trim() === '2';
+  const modeInput = (await ask('Search for (1) Movie or (2) Series? [1/2]: ', modeArg)).trim();
+  if (!['1', '2'].includes(modeInput)) {
+    throw new Error(`Invalid type choice: "${modeInput}". Enter 1 for Movie or 2 for Series.`);
+  }
+  const isSeries = modeInput === '2';
   const searchType = isSeries ? 'tv' : 'movie';
 
   const title = await ask(`${isSeries ? 'Series' : 'Movie'} title: `, args.title);
@@ -202,8 +214,8 @@ async function main() {
   }
 
   results.forEach((item, i) => console.log(`${i + 1}. ${item.title} (${item.year || 'n/a'}) [id:${item.id}]`));
-  const choice = Number(await ask('Pick result #: ', args.pick || '1'));
-  const picked = results[choice - 1] || results[0];
+  const choiceIndex = parseChoice(await ask('Pick result #: ', args.pick), results.length, 'result');
+  const picked = results[choiceIndex];
   const shareKey = await getShareKey(picked.id, isSeries ? 2 : 1);
 
   if (!shareKey) {
@@ -224,8 +236,8 @@ async function main() {
     }
 
     seasons.forEach((s, i) => console.log(`${i + 1}. ${s.file_name}`));
-    const sChoice = Number(await ask('Pick season #: ', args.season || '1'));
-    const season = seasons[sChoice - 1] || seasons[0];
+    const seasonIndex = parseChoice(await ask('Pick season #: ', args.season), seasons.length, 'season');
+    const season = seasons[seasonIndex];
 
     files = await getFiles(shareKey, season.fid);
     const episodes = files.filter((f) => f.is_dir === 0 && /\.(mp4|mkv|avi|m3u8)$/i.test(f.file_name));
@@ -236,8 +248,8 @@ async function main() {
     }
 
     episodes.forEach((e, i) => console.log(`${i + 1}. ${e.file_name}`));
-    const eChoice = Number(await ask('Pick episode #: ', args.episode || '1'));
-    files = [episodes[eChoice - 1] || episodes[0]];
+    const episodeIndex = parseChoice(await ask('Pick episode #: ', args.episode), episodes.length, 'episode');
+    files = [episodes[episodeIndex]];
   }
 
   const target = pickFile(files);
@@ -256,8 +268,8 @@ async function main() {
   }
 
   links.forEach((q, i) => console.log(`${i + 1}. ${q.quality} ${q.size || ''} ${q.speed || ''}`.trim()));
-  const qChoice = Number(await ask('Pick quality #: ', args.quality || '1'));
-  const selected = links[qChoice - 1] || links[0];
+  const qualityIndex = parseChoice(await ask('Pick quality #: ', args.quality), links.length, 'quality');
+  const selected = links[qualityIndex];
   const finalUrl = proxyUrl(selected.url);
 
   if (args.json) {
