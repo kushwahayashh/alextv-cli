@@ -4,6 +4,7 @@ import { customAlphabet } from 'nanoid';
 import fetch from 'node-fetch';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
+import { parseArgs } from 'node:util';
 
 const SHOWBOX = {
   baseUrl: 'https://mbpapi.shegu.net/api/api_client/index/',
@@ -31,7 +32,49 @@ const FEBBOX = {
 
 const nanoid = customAlphabet('1234567890abcdef', 32);
 
-const rl = readline.createInterface({ input, output });
+const { values: args } = parseArgs({
+  options: {
+    type:    { type: 'string', short: 't' },
+    title:   { type: 'string', short: 'q' },
+    pick:    { type: 'string', short: 'p' },
+    season:  { type: 'string', short: 's' },
+    episode: { type: 'string', short: 'e' },
+    quality: { type: 'string', short: 'k' },
+    json:    { type: 'boolean', short: 'j', default: false },
+    help:    { type: 'boolean', short: 'h', default: false },
+  },
+  strict: false,
+});
+
+if (args.help) {
+  console.log(`StreamFlix CLI
+
+Usage: node streamflix-cli.mjs [options]
+
+Options:
+  -t, --type <movie|series>  Content type (default: interactive)
+  -q, --title <string>       Search title
+  -p, --pick <number>        Result number to pick (default: 1)
+  -s, --season <number>      Season number (series only, default: 1)
+  -e, --episode <number>     Episode number (series only, default: 1)
+  -k, --quality <number>     Quality option number (default: 1)
+  -j, --json                 Output result as JSON (for programmatic use)
+  -h, --help                 Show this help message
+
+Examples:
+  node streamflix-cli.mjs --type movie --title "Inception" --pick 1 --quality 1
+  node streamflix-cli.mjs -t series -q "Breaking Bad" -p 1 -s 1 -e 3 -k 1 --json
+  node streamflix-cli.mjs  (interactive mode)`);
+  process.exit(0);
+}
+
+const interactive = !args.title;
+const rl = interactive ? readline.createInterface({ input, output }) : null;
+
+async function ask(prompt, argValue) {
+  if (argValue !== undefined) return argValue;
+  return rl.question(prompt);
+}
 
 function encrypt(data) {
   return CryptoJS.TripleDES.encrypt(
@@ -142,27 +185,30 @@ function pickFile(files) {
 
 async function main() {
   console.log('StreamFlix CLI');
-  const modeInput = await rl.question('Search for (1) Movie or (2) Series? [1/2]: ');
+
+  const typeMap = { movie: '1', series: '2', tv: '2' };
+  const modeArg = args.type ? (typeMap[args.type.toLowerCase()] || args.type) : undefined;
+  const modeInput = await ask('Search for (1) Movie or (2) Series? [1/2]: ', modeArg);
   const isSeries = modeInput.trim() === '2';
   const searchType = isSeries ? 'tv' : 'movie';
 
-  const title = await rl.question(`${isSeries ? 'Series' : 'Movie'} title: `);
+  const title = await ask(`${isSeries ? 'Series' : 'Movie'} title: `, args.title);
   const results = await search(title.trim(), searchType);
 
   if (!results.length) {
     console.log('No results found.');
-    rl.close();
+    rl?.close();
     return;
   }
 
   results.forEach((item, i) => console.log(`${i + 1}. ${item.title} (${item.year || 'n/a'}) [id:${item.id}]`));
-  const choice = Number(await rl.question('Pick result #: '));
+  const choice = Number(await ask('Pick result #: ', args.pick || '1'));
   const picked = results[choice - 1] || results[0];
   const shareKey = await getShareKey(picked.id, isSeries ? 2 : 1);
 
   if (!shareKey) {
     console.log('No share key found.');
-    rl.close();
+    rl?.close();
     return;
   }
 
@@ -173,24 +219,24 @@ async function main() {
     const seasons = files.filter((f) => f.is_dir === 1);
     if (!seasons.length) {
       console.log('No seasons found.');
-      rl.close();
+      rl?.close();
       return;
     }
 
     seasons.forEach((s, i) => console.log(`${i + 1}. ${s.file_name}`));
-    const sChoice = Number(await rl.question('Pick season #: '));
+    const sChoice = Number(await ask('Pick season #: ', args.season || '1'));
     const season = seasons[sChoice - 1] || seasons[0];
 
     files = await getFiles(shareKey, season.fid);
     const episodes = files.filter((f) => f.is_dir === 0 && /\.(mp4|mkv|avi|m3u8)$/i.test(f.file_name));
     if (!episodes.length) {
       console.log('No episodes found.');
-      rl.close();
+      rl?.close();
       return;
     }
 
     episodes.forEach((e, i) => console.log(`${i + 1}. ${e.file_name}`));
-    const eChoice = Number(await rl.question('Pick episode #: '));
+    const eChoice = Number(await ask('Pick episode #: ', args.episode || '1'));
     files = [episodes[eChoice - 1] || episodes[0]];
   }
 
@@ -198,29 +244,33 @@ async function main() {
 
   if (!target) {
     console.log('No video file found.');
-    rl.close();
+    rl?.close();
     return;
   }
 
   const links = await getLinks(shareKey, target.fid);
   if (!links.length) {
     console.log('No quality links found.');
-    rl.close();
+    rl?.close();
     return;
   }
 
   links.forEach((q, i) => console.log(`${i + 1}. ${q.quality} ${q.size || ''} ${q.speed || ''}`.trim()));
-  const qChoice = Number(await rl.question('Pick quality #: '));
+  const qChoice = Number(await ask('Pick quality #: ', args.quality || '1'));
   const selected = links[qChoice - 1] || links[0];
   const finalUrl = proxyUrl(selected.url);
 
-  console.log('\nSelected URL:');
-  console.log(finalUrl);
-  rl.close();
+  if (args.json) {
+    console.log(JSON.stringify({ title: picked.title, year: picked.year, quality: selected.quality, size: selected.size, url: finalUrl }));
+  } else {
+    console.log('\nSelected URL:');
+    console.log(finalUrl);
+  }
+  rl?.close();
 }
 
 main().catch((err) => {
   console.error('CLI failed:', err.message);
-  rl.close();
+  rl?.close();
   process.exitCode = 1;
 });
