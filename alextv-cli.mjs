@@ -2,6 +2,8 @@
 import CryptoJS from 'crypto-js';
 import { customAlphabet } from 'nanoid';
 import fetch from 'node-fetch';
+import { load as cheerioLoad } from 'cheerio';
+import { readFileSync } from 'node:fs';
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { parseArgs } from 'node:util';
@@ -31,6 +33,12 @@ const FEBBOX = {
 };
 
 const nanoid = customAlphabet('1234567890abcdef', 32);
+const pkg = JSON.parse(readFileSync(new URL('./package.json', import.meta.url)));
+
+const FETCH_TIMEOUT = 15_000;
+const RETRY_COUNT = 3;
+const RETRY_DELAY = 1_000;
+const GO_BACK = Symbol('GO_BACK');
 
 const { values: args } = parseArgs({
   options: {
@@ -41,10 +49,16 @@ const { values: args } = parseArgs({
     episode: { type: 'string', short: 'e' },
     quality: { type: 'string', short: 'k' },
     json:    { type: 'boolean', short: 'j', default: false },
+    version: { type: 'boolean', short: 'v', default: false },
     help:    { type: 'boolean', short: 'h', default: false },
   },
   strict: false,
 });
+
+if (args.version) {
+  console.log(`alextv-cli v${pkg.version}`);
+  process.exit(0);
+}
 
 if (args.help) {
   console.log(`AlexTV CLI
@@ -59,6 +73,7 @@ Options:
   -e, --episode <number>     Episode number (series only)
   -k, --quality <number>     Quality option number
   -j, --json                 Output result as JSON (for programmatic use)
+  -v, --version              Show version
   -h, --help                 Show this help message
 
 Examples:
@@ -83,6 +98,58 @@ function parseChoice(raw, max, label) {
     throw new Error(`Invalid ${label} choice: "${raw}". Enter a number between 1 and ${max}.`);
   }
   return n - 1;
+}
+
+async function fetchWithTimeout(url, options = {}, timeout = FETCH_TIMEOUT) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeout);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function retryFetch(url, options = {}, retries = RETRY_COUNT) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await fetchWithTimeout(url, options);
+    } catch (err) {
+      if (attempt === retries) throw err;
+      const delay = RETRY_DELAY * attempt;
+      console.error(`Request failed (attempt ${attempt}/${retries}), retrying in ${delay}ms… ${err.message}`);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+}
+
+function loadingStart(msg) {
+  if (!interactive) return { stop: () => {} };
+  const frames = ['⠋','⠙','⠹','⠸','⠼','⠴','⠦','⠧','⠇','⠏'];
+  let i = 0;
+  const interval = setInterval(() => {
+    process.stdout.write(`\r${frames[i = (i + 1) % frames.length]} ${msg}`);
+  }, 80);
+  return {
+    stop: () => {
+      clearInterval(interval);
+      process.stdout.write('\r' + ' '.repeat(msg.length + 4) + '\r');
+    },
+  };
+}
+
+async function askPick(prompt, max, label, argValue) {
+  if (argValue !== undefined) return parseChoice(argValue, max, label);
+  if (!rl) throw new Error(`Missing required argument for non-interactive mode: ${prompt.trim()}`);
+  while (true) {
+    const raw = (await rl.question(prompt)).trim();
+    if (raw.toLowerCase() === 'b') return GO_BACK;
+    try {
+      return parseChoice(raw, max, label);
+    } catch (err) {
+      console.error(err.message);
+    }
+  }
 }
 
 function encrypt(data) {
@@ -119,7 +186,7 @@ async function showboxRequest(module, params = {}) {
     token: nanoid(32),
   });
 
-  const response = await fetch(SHOWBOX.baseUrl, {
+  const response = await retryFetch(SHOWBOX.baseUrl, {
     method: 'POST',
     headers: {
       Platform: SHOWBOX.defaults.platform,
@@ -133,27 +200,41 @@ async function showboxRequest(module, params = {}) {
 }
 
 async function search(title, type = 'movie') {
-  const data = await showboxRequest('Search5', { type, keyword: title, page: '1', pagelimit: '10' });
-  return data.data || [];
+  const spinner = loadingStart('Searching');
+  try {
+    const data = await showboxRequest('Search5', { type, keyword: title, page: '1', pagelimit: '10' });
+    return data.data || [];
+  } finally {
+    spinner.stop();
+  }
 }
 
 async function getShareKey(id, type = 1) {
   const shareLinkUrl = `https://www.showbox.media/index/share_link?id=${id}&type=${type}`;
   const proxyUrl = `https://lunaissohot.lunastar0003.workers.dev/?destination=${encodeURIComponent(shareLinkUrl)}`;
-  const response = await fetch(proxyUrl, {
-    headers: {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    },
-  });
-  const text = await response.text();
-  if (!text.trim().startsWith('{')) return null;
-  const data = JSON.parse(text);
-  const link = data?.data?.link || '';
-  return link ? link.split('/').pop() : null;
+  const spinner = loadingStart('Fetching share key');
+  try {
+    const response = await retryFetch(proxyUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      },
+    });
+    const text = await response.text();
+    if (!text.trim().startsWith('{')) {
+      console.error(`getShareKey: non-JSON response (status ${response.status}), first 120 chars: ${text.slice(0, 120)}`);
+      return null;
+    }
+    const data = JSON.parse(text);
+    const link = data?.data?.link || '';
+    if (!link) console.error(`getShareKey: no link in response, keys: ${Object.keys(data?.data || {}).join(', ')}`);
+    return link ? link.split('/').pop() : null;
+  } finally {
+    spinner.stop();
+  }
 }
 
 async function febboxJson(url) {
-  const res = await fetch(url, {
+  const res = await retryFetch(url, {
     headers: {
       cookie: `ui=${FEBBOX.cookie}`,
       referer: FEBBOX.baseUrl,
@@ -166,123 +247,167 @@ async function febboxJson(url) {
 }
 
 async function getFiles(shareKey, parentId = 0) {
-  const url = `${FEBBOX.baseUrl}/file/file_share_list?share_key=${shareKey}&pwd=&parent_id=${parentId}&is_html=0`;
-  const data = await febboxJson(url);
-  return data.data?.file_list || [];
+  const spinner = loadingStart('Loading files');
+  try {
+    const url = `${FEBBOX.baseUrl}/file/file_share_list?share_key=${shareKey}&pwd=&parent_id=${parentId}&is_html=0`;
+    const data = await febboxJson(url);
+    return data.data?.file_list || [];
+  } finally {
+    spinner.stop();
+  }
 }
 
-async function getLinks(shareKey, fid) {
-  const url = `${FEBBOX.baseUrl}/console/video_quality_list?fid=${fid}`;
-  const data = await febboxJson(url);
-  const html = data.html || '';
-  const matches = [...html.matchAll(/<div[^>]*class="file_quality"[^>]*data-url="([^"]+)"[^>]*data-quality="([^"]+)"[^>]*>([\s\S]*?)<\/div>/g)];
-  return matches.map(([, url, quality, chunk]) => {
-    const name = (chunk.match(/<div class="name">([^<]+)<\/div>/)?.[1] || quality).trim();
-    const speed = (chunk.match(/<div class="speed"><span>([^<]+)<\/span>/)?.[1] || '').trim();
-    const size = (chunk.match(/<div class="size">([^<]+)<\/div>/)?.[1] || '').trim();
-    return { url, quality, name, speed, size };
-  });
+async function getLinks(fid) {
+  const spinner = loadingStart('Fetching quality links');
+  try {
+    const url = `${FEBBOX.baseUrl}/console/video_quality_list?fid=${fid}`;
+    const data = await febboxJson(url);
+    const html = data.html || '';
+    const $ = cheerioLoad(html);
+    const links = [];
+    $('.file_quality').each((_, el) => {
+      const $el = $(el);
+      const url = $el.attr('data-url');
+      const ext = (url?.match(/\.(mp4|mkv|avi|m3u8)/i)?.[1] || 'm3u8').toLowerCase();
+      links.push({
+        url,
+        quality: $el.attr('data-quality'),
+        speed: $el.find('.speed span').text().trim(),
+        size: $el.find('.size').text().trim(),
+        ext,
+      });
+    });
+    return links;
+  } finally {
+    spinner.stop();
+  }
 }
 
 function proxyUrl(url) {
   return `${FEBBOX.proxyBase}${encodeURIComponent(url)}`;
 }
 
-function pickFile(files) {
-  return files.find((f) => f.is_dir === 0 && /\.(mp4|mkv|avi|m3u8)$/i.test(f.file_name)) || null;
+function videoFiles(files) {
+  return files.filter((f) => f.is_dir === 0 && /\.(mp4|mkv|avi|m3u8)$/i.test(f.file_name));
 }
 
 async function main() {
   console.log('AlexTV CLI');
+  if (interactive) console.log("Type 'b' at any pick prompt to go back to search.\n");
 
-  const typeMap = { movie: '1', series: '2', tv: '2' };
-  const modeArg = args.type ? (typeMap[args.type.toLowerCase()] || args.type) : undefined;
-  const modeInput = (await ask('Search for (1) Movie or (2) Series? [1/2]: ', modeArg)).trim();
-  if (!['1', '2'].includes(modeInput)) {
-    throw new Error(`Invalid type choice: "${modeInput}". Enter 1 for Movie or 2 for Series.`);
-  }
-  const isSeries = modeInput === '2';
-  const searchType = isSeries ? 'tv' : 'movie';
-
-  const title = await ask(`${isSeries ? 'Series' : 'Movie'} title: `, args.title);
-  const results = await search(title.trim(), searchType);
-
-  if (!results.length) {
-    console.log('No results found.');
-    rl?.close();
-    return;
-  }
-
-  results.forEach((item, i) => console.log(`${i + 1}. ${item.title} (${item.year || 'n/a'}) [id:${item.id}]`));
-  const choiceIndex = parseChoice(await ask('Pick result #: ', args.pick), results.length, 'result');
-  const picked = results[choiceIndex];
-  const shareKey = await getShareKey(picked.id, isSeries ? 2 : 1);
-
-  if (!shareKey) {
-    console.log('No share key found.');
-    rl?.close();
-    return;
-  }
-
-  console.log(`Share key: ${shareKey}`);
-  let files = await getFiles(shareKey, 0);
-
-  if (isSeries) {
-    const seasons = files.filter((f) => f.is_dir === 1);
-    if (!seasons.length) {
-      console.log('No seasons found.');
-      rl?.close();
-      return;
+  try {
+    const typeMap = { movie: '1', series: '2', tv: '2' };
+    const modeArg = args.type ? (typeMap[args.type.toLowerCase()] || args.type) : undefined;
+    const modeInput = (await ask('Search for (1) Movie or (2) Series? [1/2]: ', modeArg)).trim();
+    if (!['1', '2'].includes(modeInput)) {
+      throw new Error(`Invalid type choice: "${modeInput}". Enter 1 for Movie or 2 for Series.`);
     }
+    const isSeries = modeInput === '2';
+    const searchType = isSeries ? 'tv' : 'movie';
 
-    seasons.forEach((s, i) => console.log(`${i + 1}. ${s.file_name}`));
-    const seasonIndex = parseChoice(await ask('Pick season #: ', args.season), seasons.length, 'season');
-    const season = seasons[seasonIndex];
+    search: while (true) {
+      const title = await ask(`${isSeries ? 'Series' : 'Movie'} title: `, args.title);
+      const results = await search(title.trim(), searchType);
 
-    files = await getFiles(shareKey, season.fid);
-    const episodes = files.filter((f) => f.is_dir === 0 && /\.(mp4|mkv|avi|m3u8)$/i.test(f.file_name));
-    if (!episodes.length) {
-      console.log('No episodes found.');
-      rl?.close();
-      return;
+      if (!results.length) {
+        console.log('No results found.');
+        if (interactive) { continue search; }
+        return;
+      }
+
+      results.forEach((item, i) => console.log(`${i + 1}. ${item.title} (${item.year || 'n/a'}) [id:${item.id}]`));
+      const choiceIndex = await askPick('Pick result #: ', results.length, 'result', args.pick);
+      if (choiceIndex === GO_BACK) { continue search; }
+      const picked = results[choiceIndex];
+      const shareKey = await getShareKey(picked.id, isSeries ? 2 : 1);
+
+      if (!shareKey) {
+        console.log('No share key found.');
+        if (interactive) { continue search; }
+        return;
+      }
+
+      console.log(`Share key: ${shareKey}`);
+      let files = await getFiles(shareKey, 0);
+      let target;
+
+      if (isSeries) {
+        const seasons = files.filter((f) => f.is_dir === 1);
+        if (!seasons.length) {
+          console.log('No seasons found.');
+          if (interactive) { continue search; }
+          return;
+        }
+
+        let season, episodes;
+        seasonPick: while (true) {
+          seasons.forEach((s, i) => console.log(`${i + 1}. ${s.file_name}`));
+          const seasonIndex = await askPick('Pick season #: ', seasons.length, 'season', args.season);
+          if (seasonIndex === GO_BACK) { continue search; }
+          season = seasons[seasonIndex];
+
+          files = await getFiles(shareKey, season.fid);
+          episodes = videoFiles(files);
+          if (!episodes.length) {
+            console.log('No episodes found in this season.');
+            if (interactive) { continue seasonPick; }
+            return;
+          }
+          break seasonPick;
+        }
+
+        episodes.forEach((e, i) => console.log(`${i + 1}. ${e.file_name}`));
+        const episodeIndex = await askPick('Pick episode #: ', episodes.length, 'episode', args.episode);
+        if (episodeIndex === GO_BACK) { continue search; }
+        target = episodes[episodeIndex];
+      } else {
+        const vids = videoFiles(files);
+        if (!vids.length) {
+          console.log('No video file found.');
+          if (interactive) { continue search; }
+          return;
+        }
+
+        if (vids.length === 1) {
+          target = vids[0];
+        } else {
+          vids.forEach((v, i) => console.log(`${i + 1}. ${v.file_name}`));
+          const fileIndex = await askPick('Pick file #: ', vids.length, 'file');
+          if (fileIndex === GO_BACK) { continue search; }
+          target = vids[fileIndex];
+        }
+      }
+
+      const links = await getLinks(target.fid);
+      if (!links.length) {
+        console.log('No quality links found.');
+        if (interactive) { continue search; }
+        return;
+      }
+
+      links.forEach((q, i) => {
+        const tag = q.ext === 'm3u8' ? 'HLS stream' : 'direct file download';
+        console.log(`${i + 1}. ${q.quality} ${q.size || ''} ${q.speed || ''} [${q.ext}] ← ${tag}`.trim());
+      });
+      const qualityIndex = await askPick('Pick quality #: ', links.length, 'quality', args.quality);
+      if (qualityIndex === GO_BACK) { continue search; }
+      const selected = links[qualityIndex];
+      const finalUrl = proxyUrl(selected.url);
+
+      if (args.json) {
+        console.log(JSON.stringify({ title: picked.title, year: picked.year, quality: selected.quality, size: selected.size, ext: selected.ext, url: finalUrl }));
+      } else {
+        console.log('\nSelected URL:');
+        console.log(finalUrl);
+      }
+      break search;
     }
-
-    episodes.forEach((e, i) => console.log(`${i + 1}. ${e.file_name}`));
-    const episodeIndex = parseChoice(await ask('Pick episode #: ', args.episode), episodes.length, 'episode');
-    files = [episodes[episodeIndex]];
-  }
-
-  const target = pickFile(files);
-
-  if (!target) {
-    console.log('No video file found.');
+  } finally {
     rl?.close();
-    return;
   }
-
-  const links = await getLinks(shareKey, target.fid);
-  if (!links.length) {
-    console.log('No quality links found.');
-    rl?.close();
-    return;
-  }
-
-  links.forEach((q, i) => console.log(`${i + 1}. ${q.quality} ${q.size || ''} ${q.speed || ''}`.trim()));
-  const qualityIndex = parseChoice(await ask('Pick quality #: ', args.quality), links.length, 'quality');
-  const selected = links[qualityIndex];
-  const finalUrl = proxyUrl(selected.url);
-
-  if (args.json) {
-    console.log(JSON.stringify({ title: picked.title, year: picked.year, quality: selected.quality, size: selected.size, url: finalUrl }));
-  } else {
-    console.log('\nSelected URL:');
-    console.log(finalUrl);
-  }
-  rl?.close();
 }
 
 main().catch((err) => {
   console.error('CLI failed:', err.message);
-  rl?.close();
   process.exitCode = 1;
 });
