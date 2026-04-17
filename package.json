@@ -1,0 +1,30 @@
+{
+  "name": "alextv-cli",
+  "version": "1.0.0",
+  "description": "A single-file Node.js CLI tool to search and stream movies & TV series from ShowBox/FebBox.",
+  "main": "alextv-cli.mjs",
+  "bin": {
+    "alextv": "alextv-cli.mjs"
+  },
+  "scripts": {
+    "start": "node alextv-cli.mjs",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kushwahayashh/alextv-cli.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/kushwahayashh/alextv-cli/issues"
+  },
+  "homepage": "https://github.com/kushwahayashh/alextv-cli#readme",
+  "dependencies": {
+    "crypto-js": "^4.2.0",
+    "nanoid": "^5.1.9",
+    "node-fetch": "^3.3.2"
+  }
+}
